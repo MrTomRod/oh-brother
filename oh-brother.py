@@ -19,9 +19,10 @@ import asyncio
 try:
   from pysnmp.hlapi.asyncio import (
     SnmpEngine, CommunityData, UdpTransportTarget, ContextData,
-    ObjectType, ObjectIdentity, walk_cmd
+    next_cmd, Null, EndOfMibView
   )
-  HAVE_WALK_CMD = True
+  from pysnmp.proto.rfc1902 import ObjectName
+  HAVE_MODERN_API = True
 except (ImportError, AttributeError):
   # PySNMP 4.x's `pysnmp.hlapi.asyncio` fails to import with AttributeError
   # rather than ImportError on Python >= 3.11, because its transport layer
@@ -29,7 +30,7 @@ except (ImportError, AttributeError):
   # Debian 12's `python3-pysnmp4` (4.4.12 on Python 3.11) hits exactly this,
   # so both exception types must fall back to the legacy API.
   from pysnmp.entity.rfc3413.oneliner import cmdgen
-  HAVE_WALK_CMD = False
+  HAVE_MODERN_API = False
 
 import urllib.request, urllib.error, urllib.parse
 import xml.etree.ElementTree as ET
@@ -48,25 +49,57 @@ from functools import wraps
 def get_snmp_table(ip, community):
   oid = '1.3.6.1.4.1.2435.2.4.3.99.3.1.6.1.2'
 
-  if HAVE_WALK_CMD:
+  if HAVE_MODERN_API:
+    # `walk_cmd()` on PySNMP 7.1.6 ends the walk without reporting a PDU
+    # error, which would silently turn a failed walk into an empty table.
+    # Walk with `next_cmd()` instead so PDU errors are reported like they
+    # are on the legacy `cmdgen` path below
     async def _walk():
       target = await UdpTransportTarget.create((ip, 161))
+      engine = SnmpEngine()
+      initial = name = ObjectName(oid)
       table = []
-      async for errorIndication, errorStatus, errorIndex, varBinds in walk_cmd(
-        SnmpEngine(),
-        CommunityData(community),
-        target,
-        ContextData(),
-        ObjectType(ObjectIdentity(oid)),
-        lexicographicMode = False,
-      ):
+
+      while True:
+        errorIndication, errorStatus, errorIndex, varBindTable = await next_cmd(
+          engine,
+          CommunityData(community),
+          target,
+          ContextData(),
+          (name, Null('')),
+          lookupMib = False)
+
         if errorIndication:
           raise Exception(errorIndication)
+
         if errorStatus:
-          raise Exception('ERROR: %s at %s' % (
-            errorStatus.prettyPrint(),
-            errorIndex and varBinds[int(errorIndex) - 1] or '?'))
-        table.append(varBinds)
+          # An agent may report noSuchName for a walk that ran past the end
+          # of its MIB.  Both `walk_cmd()` and `cmdgen.nextCmd()` treat that
+          # as the end of the walk instead of an error
+          if errorStatus == 2: break
+
+          # PySNMP replaces the response bindings with an empty tuple when
+          # the PDU reports an error, so there may be nothing to point at
+          index = errorIndex and int(errorIndex)
+          if index and index <= len(varBindTable):
+            at = varBindTable[index - 1]
+          else:
+            at = name
+          raise Exception('ERROR: %s at %s' % (errorStatus.prettyPrint(), at))
+
+        nextName, value = varBindTable[0]
+
+        if isinstance(value, (Null, EndOfMibView)): break
+        if not initial.isPrefixOf(nextName): break
+
+        # Stop rather than looping forever should an agent fail to advance
+        # the walk.  The legacy `cmdgen` path reports this as an error too
+        if name.asTuple() >= nextName.asTuple():
+          raise Exception('OID not increasing: %s' % nextName)
+
+        name = nextName
+        table.append(varBindTable)
+
       return table
 
     return asyncio.run(_walk())

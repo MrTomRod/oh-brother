@@ -1,11 +1,12 @@
 # oh-brother works with either the legacy `pysnmp.entity.rfc3413.oneliner`
 # API (removed in v6.2, see
 # https://github.com/lextudio/pysnmp/compare/v6.1.4..v6.2) or the modern
-# `pysnmp.hlapi.asyncio` `walk_cmd` API, which was added in v7.1.6 and
-# requires Python >= 3.9.
+# `pysnmp.hlapi.asyncio` API, which is available from v7.1.6 on and requires
+# Python >= 3.9.
 #
-# PySNMP 6.2.x through 7.1.5 provide neither API: `cmdgen` is gone and
-# `walk_cmd` was still named `walkCmd`, so those releases are excluded.
+# PySNMP 6.2.x through 7.1.5 provide neither API: `cmdgen` is gone and their
+# asyncio API still uses the old `walkCmd` spelling, so those releases are
+# excluded.
 #
 # Additionally, Python 3.12 completely removes the `asyncore` module from
 # the standard library, so PySNMP versions older than 6.x do not work with
